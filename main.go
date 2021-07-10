@@ -1,11 +1,13 @@
 package main
 
 import (
+	"archive/zip"
 	"context"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -22,13 +24,20 @@ func main() {
 	pflag.IntVar(&from, "from", from, `first page to download`)
 	var to = -1
 	pflag.IntVar(&to, "to", to, `last page to download, if -1, then download until not found`)
+	var cbz string
+	pflag.StringVar(&cbz, "cbz", cbz, `output cbz file, will not be generated if empty, will use comic name if @auto`)
 	pflag.Parse()
+
+	var comic = pflag.Arg(0)
+	if cbz == "@auto" {
+		cbz = comic + ".cbz"
+	}
 
 	if from < to && to > 0 {
 		panic("--from must be less then --to")
 	}
 	var client, errClient = client.NewClient(client.Config{
-		Comic:    pflag.Arg(0),
+		Comic:    comic,
 		ProxyURL: client.SOCKS5("localhost:9050", nil),
 	})
 	if errClient != nil {
@@ -45,13 +54,16 @@ func main() {
 		to = totalPages
 	}
 
-	_ = os.MkdirAll("pages", 0775)
+	var imageDir = filepath.Join(os.TempDir(), comic)
+	log.Printf("storing images in %s", imageDir)
+	_ = os.MkdirAll(imageDir, 0775)
 	var errDownload = (&downloader{
 		client:  client,
 		from:    from,
 		to:      to,
 		trottle: 500 * time.Millisecond,
-		dir:     "pages",
+		dir:     imageDir,
+		cbz:     cbz,
 	}).Run(ctx)
 	if errDownload != nil {
 		panic(errDownload)
@@ -63,6 +75,7 @@ type downloader struct {
 	from, to int
 	trottle  time.Duration
 	dir      string
+	cbz      string
 }
 
 type Client interface {
@@ -92,7 +105,8 @@ func (d *downloader) Run(ctx context.Context) error {
 				log.Printf("unable to download page %d: %v", id, errDownload)
 				return errDownload
 			}
-			log.Printf("downloaded issue %d in %s", id, time.Since(tick))
+			var percentage = 100 * float64(id-d.from) / float64(d.to-d.from)
+			log.Printf("downloaded issue %d/%d (%.1f%%)in %s", id, to, percentage, time.Since(tick))
 			return nil
 		})
 	}
@@ -110,7 +124,18 @@ pagesDownloading:
 		}
 	}
 
-	return wg.Wait()
+	var errWait = wg.Wait()
+	if errWait != nil {
+		return fmt.Errorf("downloading images: %w", errWait)
+	}
+	if d.cbz == "" {
+		return nil
+	}
+	var errCBZ = d.generateCBZ()
+	if errCBZ != nil {
+		return fmt.Errorf("generating cbz file: %w", errCBZ)
+	}
+	return nil
 }
 
 func (d *downloader) downloadFile(ctx context.Context, id int) error {
@@ -118,24 +143,22 @@ func (d *downloader) downloadFile(ctx context.Context, id int) error {
 	if fileExists(tmp) {
 		_ = os.Remove(tmp)
 	}
+
 	var filename = d.filename(id)
-	if fileExists(filename) {
+	if fileExists(filename+".jpeg") ||
+		fileExists(filename+".png") ||
+		fileExists(filename+".gif") {
 		return nil
 	}
 
-	if err := d.saveFile(ctx, id, tmp); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filename)
-}
-
-func (d *downloader) saveFile(ctx context.Context, id int, dst string) error {
 	var img, errIssue = d.client.FetchIssue(ctx, id)
 	if errIssue != nil {
 		return fmt.Errorf("fetchin image: %w", errIssue)
 	}
+	defer img.Data.Close()
+	filename += img.Ext
 
-	var file, errFile = os.Create(dst + img.Ext)
+	var file, errFile = os.Create(tmp)
 	if errFile != nil {
 		return fmt.Errorf("creating file: %w", errFile)
 	}
@@ -145,7 +168,8 @@ func (d *downloader) saveFile(ctx context.Context, id int, dst string) error {
 	if errCopy != nil {
 		return fmt.Errorf("downloading image: %w", errCopy)
 	}
-	return nil
+
+	return os.Rename(tmp, filename)
 }
 
 func (d *downloader) filename(id int) string {
@@ -172,4 +196,43 @@ func (d *downloader) nameFormat() string {
 func fileExists(name string) bool {
 	var _, err = os.Stat(name)
 	return err == nil
+}
+
+func (d *downloader) generateCBZ() error {
+	var output, errOutput = os.Create(d.cbz)
+	if errOutput != nil {
+		return fmt.Errorf("creating cbz file: %w", errOutput)
+	}
+	defer output.Close()
+	var files, errFiles = os.ReadDir(d.dir)
+	if errFiles != nil {
+		return fmt.Errorf("reading cache dir: %w", errFiles)
+	}
+
+	var archive = zip.NewWriter(output)
+	for _, fileInfo := range files {
+		var f, errFile = archive.Create(fileInfo.Name())
+		if errFile != nil {
+			return fmt.Errorf("storing file %s: %w", fileInfo.Name(), errFile)
+		}
+		var filename = path.Join(d.dir, fileInfo.Name())
+		var errRead = readFileTo(f, filename)
+		if errRead != nil {
+			return fmt.Errorf("storing file %s: %w", fileInfo.Name(), errRead)
+		}
+	}
+	return archive.Close()
+}
+
+func readFileTo(dst io.Writer, name string) error {
+	var src, errSrc = os.Open(name)
+	if errSrc != nil {
+		return fmt.Errorf("opening source file %s: %w", name, errSrc)
+	}
+	defer src.Close()
+	var _, errCopy = io.Copy(dst, src)
+	if errCopy != nil {
+		return fmt.Errorf("copying file %s: %w", name, errCopy)
+	}
+	return nil
 }

@@ -19,7 +19,7 @@ var (
 )
 
 func (client *Client) TotalPages(ctx context.Context) (int, error) {
-	var comicPage = schema + path.Join(site, client.comic)
+	var comicPage = schema + path.Join(site, client.comic, "about")
 	var resp, errResp = client.fetchPage(ctx, comicPage)
 	if errResp != nil {
 		return 0, fmt.Errorf("fetching main comic page: %w", errResp)
@@ -30,9 +30,10 @@ func (client *Client) TotalPages(ctx context.Context) (int, error) {
 	if errParsing != nil {
 		return 0, fmt.Errorf("parsing page: %w", errParsing)
 	}
-	var raw = DOM.Find(".issueNumber").First().Text()
-	var token = strings.SplitN(raw, "/", 2)[1]
-	var n, errParseNumber = strconv.Atoi(token)
+	var node = DOM.Find(".about-summary > p:nth-child(104)").First()
+	node.Children().Remove()
+	var raw = strings.TrimSpace(node.Text())
+	var n, errParseNumber = strconv.Atoi(raw)
 	if errParseNumber != nil {
 		return 0, fmt.Errorf("parsing total page numbers: %w", errParseNumber)
 	}
@@ -65,9 +66,8 @@ func (client *Client) FetchIssue(ctx context.Context, id int) (*file.File, error
 	if errImage != nil {
 		return nil, fmt.Errorf("loading image: %w", errImage)
 	}
-	defer imageData.Body.Close()
 
-	return file.FromResponse(resp), nil
+	return file.FromResponse(imageData), nil
 }
 
 func issueNumber(DOM *goquery.Document) int {
@@ -102,11 +102,12 @@ func (client *Client) fetchPage(ctx context.Context, pageURL string) (*http.Resp
 	req.Header.Set("User-Agent", "acomics")
 	var resp, errResp = client.c.Do(req)
 	if errResp != nil {
-		return nil, fmt.Errorf("executing request: %w", errResp)
+		return nil, fmt.Errorf("executing request GET %q: %w", pageURL, errResp)
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
-		return nil, ErrUnexpectedStatus(resp.StatusCode)
+		var err = ErrUnexpectedStatus(resp.StatusCode)
+		return nil, fmt.Errorf("downloading page %q: %w", pageURL, err)
 	}
 	return resp, nil
 }

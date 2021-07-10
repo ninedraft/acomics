@@ -5,6 +5,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"strings"
 )
 
 type File struct {
@@ -22,17 +23,17 @@ func FromResponse(resp *http.Response) *File {
 }
 
 func parseFileExt(resp *http.Response) string {
+	var nameExt = path.Ext(resp.Request.URL.Path)
+	if nameExt != "" {
+		return strings.ToLower(nameExt)
+	}
 	var ct = resp.Header.Get("Content-Type")
 	var mimeType, _, errMIME = mime.ParseMediaType(ct)
 	if errMIME == nil {
 		var exts, _ = mime.ExtensionsByType(mimeType)
 		if len(exts) > 0 {
-			return exts[0]
+			return strings.ToLower(exts[0])
 		}
-	}
-	var nameExt = path.Ext(resp.Request.URL.Path)
-	if nameExt != "" {
-		return nameExt
 	}
 	return ".jpeg"
 }
