@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.con/ninedraft/acomics/file"
 )
 
 var (
@@ -18,39 +18,56 @@ var (
 	ErrIssueNotFound = errors.New("issue is not found")
 )
 
-func (client *Client) FetchIssue(ctx context.Context, id int, dst io.Writer) error {
-	var resp, errResp = client.fetchPage(ctx, client.comicPageURL(id))
+func (client *Client) TotalPages(ctx context.Context) (int, error) {
+	var comicPage = schema + path.Join(site, client.comic)
+	var resp, errResp = client.fetchPage(ctx, comicPage)
 	if errResp != nil {
-		return fmt.Errorf("fetching page %d: %w", id, errResp)
+		return 0, fmt.Errorf("fetching main comic page: %w", errResp)
 	}
 	defer resp.Body.Close()
 
 	var DOM, errParsing = goquery.NewDocumentFromReader(resp.Body)
 	if errParsing != nil {
-		return fmt.Errorf("parsing page: %w", errParsing)
+		return 0, fmt.Errorf("parsing page: %w", errParsing)
+	}
+	var raw = DOM.Find(".issueNumber").First().Text()
+	var token = strings.SplitN(raw, "/", 2)[1]
+	var n, errParseNumber = strconv.Atoi(token)
+	if errParseNumber != nil {
+		return 0, fmt.Errorf("parsing total page numbers: %w", errParseNumber)
+	}
+	return n, nil
+}
+
+func (client *Client) FetchIssue(ctx context.Context, id int) (*file.File, error) {
+	var resp, errResp = client.fetchPage(ctx, client.comicPageURL(id))
+	if errResp != nil {
+		return nil, fmt.Errorf("fetching page %d: %w", id, errResp)
+	}
+	defer resp.Body.Close()
+
+	var DOM, errParsing = goquery.NewDocumentFromReader(resp.Body)
+	if errParsing != nil {
+		return nil, fmt.Errorf("parsing page: %w", errParsing)
 	}
 	var actualIssueID = issueNumber(DOM)
 	if actualIssueID != id {
-		return fmt.Errorf("%w: trying to fetch issue %d, got %d", ErrIssueNotFound, id, actualIssueID)
+		return nil, fmt.Errorf("%w: trying to fetch issue %d, got %d", ErrIssueNotFound, id, actualIssueID)
 	}
 	var imageURL, imageOK = DOM.Find("#mainImage").
 		First().
 		Attr("src")
 	if !imageOK {
-		return errImageNotFound
+		return nil, errImageNotFound
 	}
 
 	var imageData, errImage = client.fetchPage(ctx, client.comicFile(imageURL))
 	if errImage != nil {
-		return fmt.Errorf("loading image: %w", errImage)
+		return nil, fmt.Errorf("loading image: %w", errImage)
 	}
 	defer imageData.Body.Close()
 
-	var _, errCopy = io.Copy(dst, imageData.Body)
-	if errCopy != nil {
-		return fmt.Errorf("streaming image: %w", errCopy)
-	}
-	return nil
+	return file.FromResponse(resp), nil
 }
 
 func issueNumber(DOM *goquery.Document) int {

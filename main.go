@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.con/ninedraft/acomics/client"
+	"github.con/ninedraft/acomics/file"
 
 	"github.com/spf13/pflag"
 	"golang.org/x/sync/errgroup"
@@ -35,6 +36,15 @@ func main() {
 	}
 	var ctx, cancel = context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
+
+	if to < 0 {
+		var totalPages, errTotalPages = client.TotalPages(ctx)
+		if errTotalPages != nil {
+			panic(errTotalPages)
+		}
+		to = totalPages
+	}
+
 	_ = os.MkdirAll("pages", 0775)
 	var errDownload = (&downloader{
 		client:  client,
@@ -49,10 +59,15 @@ func main() {
 }
 
 type downloader struct {
-	client   *client.Client
+	client   Client
 	from, to int
 	trottle  time.Duration
 	dir      string
+}
+
+type Client interface {
+	TotalPages(ctx context.Context) (int, error)
+	FetchIssue(ctx context.Context, id int) (*file.File, error)
 }
 
 func (d *downloader) Run(ctx context.Context) error {
@@ -95,14 +110,7 @@ pagesDownloading:
 		}
 	}
 
-	var errWait = wg.Wait()
-	switch {
-	case errWait == nil,
-		errors.Is(errWait, client.ErrIssueNotFound):
-		return nil
-	default:
-		return errWait
-	}
+	return wg.Wait()
 }
 
 func (d *downloader) downloadFile(ctx context.Context, id int) error {
@@ -122,20 +130,30 @@ func (d *downloader) downloadFile(ctx context.Context, id int) error {
 }
 
 func (d *downloader) saveFile(ctx context.Context, id int, dst string) error {
-	var file, errFile = os.Create(dst)
+	var img, errIssue = d.client.FetchIssue(ctx, id)
+	if errIssue != nil {
+		return fmt.Errorf("fetchin image: %w", errIssue)
+	}
+
+	var file, errFile = os.Create(dst + img.Ext)
 	if errFile != nil {
 		return fmt.Errorf("creating file: %w", errFile)
 	}
 	defer file.Close()
-	return d.client.FetchIssue(ctx, id, file)
+
+	var _, errCopy = io.Copy(file, img.Data)
+	if errCopy != nil {
+		return fmt.Errorf("downloading image: %w", errCopy)
+	}
+	return nil
 }
 
 func (d *downloader) filename(id int) string {
-	return filepath.Join(d.dir, fmt.Sprintf(d.nameFormat()+".jpeg", id))
+	return filepath.Join(d.dir, fmt.Sprintf(d.nameFormat(), id))
 }
 
 func (d *downloader) tmp(id int) string {
-	return filepath.Join(d.dir, fmt.Sprintf(d.nameFormat()+".jpeg_tmp", id))
+	return filepath.Join(d.dir, fmt.Sprintf(d.nameFormat()+"tmp", id))
 }
 
 func (d *downloader) nameFormat() string {
