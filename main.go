@@ -15,6 +15,7 @@ import (
 	"github.con/ninedraft/acomics/client"
 	"github.con/ninedraft/acomics/file"
 
+	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/pflag"
 	"golang.org/x/sync/errgroup"
 )
@@ -64,6 +65,7 @@ func main() {
 		trottle: 500 * time.Millisecond,
 		dir:     imageDir,
 		cbz:     cbz,
+		tickets: make(chan struct{}, 2),
 	}).Run(ctx)
 	if errDownload != nil {
 		panic(errDownload)
@@ -76,6 +78,7 @@ type downloader struct {
 	trottle  time.Duration
 	dir      string
 	cbz      string
+	tickets  chan struct{}
 }
 
 type Client interface {
@@ -89,39 +92,25 @@ func (d *downloader) Run(ctx context.Context) error {
 		to = 0
 	}
 	wg, ctx := errgroup.WithContext(ctx)
-	var tickets = make(chan struct{}, 2)
+	var bar = progressbar.Default(int64(d.to - d.from))
+	defer bar.Finish()
+
 	var downloadIssue = func(id int) {
 		wg.Go(func() error {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case tickets <- struct{}{}:
-				// pass
-			}
-			defer func() { <-tickets }()
-			var tick = time.Now()
+			var desc = fmt.Sprintf("page %d", id)
+			bar.Describe(desc)
 			var errDownload = d.downloadFile(ctx, id)
 			if errDownload != nil {
 				log.Printf("unable to download page %d: %v", id, errDownload)
 				return errDownload
 			}
-			var percentage = 100 * float64(id-d.from) / float64(d.to-d.from)
-			log.Printf("downloaded issue %d/%d (%.1f%%)in %s", id, to, percentage, time.Since(tick))
+			bar.Add(1)
 			return nil
 		})
 	}
 
-	var ticker = time.NewTicker(d.trottle)
-	defer ticker.Stop()
-
-pagesDownloading:
-	for id := d.from; (id <= d.to || d.to < 0) && ctx.Err() == nil; id++ {
+	for id := d.from; id <= d.to && ctx.Err() == nil; id++ {
 		downloadIssue(id)
-		select {
-		case <-ctx.Done():
-			break pagesDownloading
-		case <-ticker.C:
-		}
 	}
 
 	var errWait = wg.Wait()
@@ -149,6 +138,14 @@ func (d *downloader) downloadFile(ctx context.Context, id int) error {
 		fileExists(filename+".png") ||
 		fileExists(filename+".gif") {
 		return nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case d.tickets <- struct{}{}:
+		defer func() { <-d.tickets }()
+		defer time.Sleep(d.trottle)
 	}
 
 	var img, errIssue = d.client.FetchIssue(ctx, id)
