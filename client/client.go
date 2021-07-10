@@ -2,16 +2,13 @@ package client
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"path"
-	"strconv"
+	"net/url"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
+	"golang.org/x/net/proxy"
 )
 
 const (
@@ -20,92 +17,82 @@ const (
 )
 
 type Client struct {
+	cfg   Config
 	comic string
 	c     *http.Client
 }
 
-func NewClient(comic string) *Client {
+type Config struct {
+	Comic    string
+	ProxyURL *url.URL
+}
+
+func NewClient(cfg Config) (*Client, error) {
+	var transport, errTransport = cfg.transport(newDialer())
+	if errTransport != nil {
+		return nil, fmt.Errorf("creating HTTP transport: %w", errTransport)
+	}
 	return &Client{
-		comic: "~" + comic,
-		c:     newDefaultHTTPClient(),
-	}
+		cfg:   cfg,
+		comic: "~" + cfg.Comic,
+		c: &http.Client{
+			Transport: transport,
+		},
+	}, nil
 }
 
-var errImageNotFound = errors.New("main image is not found")
-
-func (client *Client) FetchIssue(ctx context.Context, id int, dst io.Writer) error {
-	var resp, errResp = client.fetchPage(ctx, client.comicPageURL(id))
-	if errResp != nil {
-		return fmt.Errorf("fetching page %d", id)
+func SOCKS5(host string, auth *proxy.Auth) *url.URL {
+	var u = &url.URL{
+		Scheme: "socks5",
+		Host:   host,
 	}
-	defer resp.Body.Close()
-
-	var DOM, errParsing = goquery.NewDocumentFromReader(resp.Body)
-	if errParsing != nil {
-		return fmt.Errorf("parsing page: %w", errParsing)
+	if auth != nil {
+		u.User = url.UserPassword(auth.User, auth.Password)
 	}
-	var imageURL, imageOK = DOM.Find("#mainImage").
-		First().
-		Attr("src")
-	if !imageOK {
-		return errImageNotFound
-	}
-	var imageData, errImage = client.fetchPage(ctx, client.comicFile(imageURL))
-	if errImage != nil {
-		return fmt.Errorf("loading image: %w", errImage)
-	}
-	defer imageData.Body.Close()
-
-	var _, errCopy = io.Copy(dst, imageData.Body)
-	if errCopy != nil {
-		return fmt.Errorf("streaming image: %w", errCopy)
-	}
-	return nil
+	return u
 }
 
-func (client *Client) comicPageURL(id int) string {
-	return schema + path.Join(site, client.comic, strconv.Itoa(id))
+func (config *Config) transport(dialer netDialer) (*http.Transport, error) {
+	if config == nil || config.ProxyURL == nil {
+		return newTransport(dialer), nil
+	}
+	var proxyDialer, errProxy = proxy.FromURL(config.ProxyURL, dialer)
+	if errProxy != nil {
+		return nil, fmt.Errorf("creating proxy: %w", errProxy)
+	}
+	return newTransport(proxyDialer), nil
 }
 
-func (client *Client) comicFile(link string) string {
-	return schema + path.Join(site, link)
-}
-
-var errUnexpectedStatus = errors.New("unexpected status")
-
-func (client *Client) fetchPage(ctx context.Context, pageURL string) (*http.Response, error) {
-	var req, errReq = http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
-	if errReq != nil {
-		return nil, fmt.Errorf("preparing request: %w", errReq)
-	}
-	var resp, errResp = client.c.Do(req)
-	if errResp != nil {
-		return nil, fmt.Errorf("executing request: %w", errResp)
-	}
-	if resp.StatusCode != http.StatusOK {
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("%w: %s", errUnexpectedStatus, resp.Status)
-	}
-	return resp, nil
-}
-
-func newDefaultHTTPClient() *http.Client {
-	var dialer = (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).DialContext
+func newTransport(dialer netDialer) *http.Transport {
 	var transport = &http.Transport{
-		DialContext:           dialer,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          1,
-		MaxConnsPerHost:       2,
+		MaxConnsPerHost:       10,
 		ReadBufferSize:        1 << 20,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
-	return &http.Client{
-		Transport: transport,
-		Timeout:   30 * time.Second,
+	switch dialer := dialer.(type) {
+	case netContextDialer:
+		transport.DialContext = dialer.DialContext
+	default:
+		transport.Dial = dialer.Dial
+	}
+	return transport
+}
+
+type netDialer interface {
+	Dial(network, address string) (net.Conn, error)
+}
+
+type netContextDialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+func newDialer() *net.Dialer {
+	return &net.Dialer{
+		Timeout:   5 * time.Minute,
+		KeepAlive: 30 * time.Second,
 	}
 }
