@@ -19,7 +19,7 @@ var (
 )
 
 func (client *Client) TotalPages(ctx context.Context) (int, error) {
-	var comicPage = schema + path.Join(site, client.comic, "about")
+	var comicPage = schema + path.Join(site, client.comic)
 	var resp, errResp = client.fetchPage(ctx, comicPage)
 	if errResp != nil {
 		return 0, fmt.Errorf("fetching main comic page: %w", errResp)
@@ -30,10 +30,8 @@ func (client *Client) TotalPages(ctx context.Context) (int, error) {
 	if errParsing != nil {
 		return 0, fmt.Errorf("parsing page: %w", errParsing)
 	}
-	var node = DOM.Find(".about-summary > p:nth-child(104)").First()
-	node.Children().Remove()
-	var raw = strings.TrimSpace(node.Text())
-	var n, errParseNumber = strconv.Atoi(raw)
+	var raw, _ = DOM.Find(".read2").First().Attr("href")
+	var n, errParseNumber = strconv.Atoi(path.Base(raw))
 	if errParseNumber != nil {
 		return 0, fmt.Errorf("parsing total page numbers: %w", errParseNumber)
 	}
